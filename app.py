@@ -6,9 +6,6 @@ app = Flask(__name__)
 
 leituras = []
 
-# =========================
-# 📷 SCANNER
-# =========================
 @app.route('/')
 def index():
     return render_template_string("""
@@ -25,32 +22,60 @@ def index():
 
 <div id="reader" style="width:300px;margin:auto;"></div>
 
+<br>
+<button onclick="trocarCamera()">🔄 Trocar Câmera</button>
+
 <h2 id="status">Aguardando leitura...</h2>
 <h3 id="raw"></h3>
 
 <script>
-function start(){
-    let scanner = new Html5Qrcode("reader");
+let scanner;
+let cameras = [];
+let cameraIndex = 0;
 
+function iniciar(cameraId){
+    scanner = new Html5Qrcode("reader");
+
+    scanner.start(cameraId, { fps:10, qrbox:250 }, (text)=>{
+
+        document.getElementById("raw").innerText = "RAW: " + text;
+
+        fetch('/scan', {
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({code:text})
+        })
+        .then(r=>r.json())
+        .then(resp=>{
+            document.getElementById("status").innerText = resp.msg;
+        });
+
+        let audio = new Audio("https://www.soundjay.com/buttons/sounds/beep-07.mp3");
+        audio.play();
+    });
+}
+
+function start(){
     Html5Qrcode.getCameras().then(devices => {
 
-        let cam = devices[0].id;
+        cameras = devices;
 
-        scanner.start(cam, { fps:10, qrbox:250 }, (text)=>{
+        // 🔥 PRIORIZA TRASEIRA
+        let traseira = devices.find(d =>
+            d.label.toLowerCase().includes("back") ||
+            d.label.toLowerCase().includes("traseira")
+        );
 
-            document.getElementById("raw").innerText = "RAW: " + text;
+        cameraIndex = traseira ? devices.indexOf(traseira) : 0;
 
-            fetch('/scan', {
-                method:'POST',
-                headers:{'Content-Type':'application/json'},
-                body: JSON.stringify({code:text})
-            })
-            .then(r=>r.json())
-            .then(resp=>{
-                document.getElementById("status").innerText = resp.msg;
-            });
+        iniciar(devices[cameraIndex].id);
+    });
+}
 
-        });
+function trocarCamera(){
+    scanner.stop().then(() => {
+        cameraIndex = (cameraIndex + 1) % cameras.length;
+        iniciar(cameras[cameraIndex].id);
     });
 }
 
@@ -62,7 +87,7 @@ start();
 """)
 
 # =========================
-# 📥 SCAN UNIVERSAL
+# SCAN UNIVERSAL
 # =========================
 @app.route('/scan', methods=['POST'])
 def scan():
@@ -79,7 +104,6 @@ def scan():
 
         codigo = f"{obra}.{caixa}-{pacote}"
 
-        # evitar duplicado
         for l in leituras:
             if l["codigo"] == codigo:
                 return {"msg": f"⚠️ DUPLICADO: {codigo}"}
@@ -97,9 +121,6 @@ def scan():
 
     return {"msg": f"❌ NÃO RECONHECIDO"}
 
-# =========================
-# DEBUG DADOS
-# =========================
 @app.route('/dados')
 def dados():
     return jsonify(leituras)
