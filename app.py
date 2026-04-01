@@ -1,266 +1,341 @@
-from flask import Flask, request, render_template_string, jsonify, send_file
+from flask import Flask, request, jsonify, send_file, redirect, session
+from flask import render_template_string
 from datetime import datetime
+import psycopg2
+import os
 import re
 from openpyxl import Workbook
 import io
 
 app = Flask(__name__)
+app.secret_key = "expedicao123"
 
-leituras = []
+DATABASE_URL = os.environ.get("DATABASE_URL")
+
+def get_db():
+    return psycopg2.connect(DATABASE_URL)
 
 # =========================
-# SCANNER
+# LOGIN
 # =========================
-@app.route('/')
-def index():
-    return render_template_string("""
+@app.route('/', methods=['GET','POST'])
+def login():
+    if request.method == 'POST':
+        if request.form['user'] == "admin" and request.form['senha'] == "123":
+            session['logado'] = True
+            return redirect('/scanner')
+
+    return """
+    <h2>Login</h2>
+    <form method="post">
+        <input name="user" placeholder="Usuário"><br><br>
+        <input name="senha" type="password" placeholder="Senha"><br><br>
+        <button>Entrar</button>
+    </form>
+    """
+
+def protegido():
+    return 'logado' in session
+
+# =========================
+# SCANNER PRO
+# =========================
+@app.route('/scanner')
+def scanner():
+    if not protegido():
+        return redirect('/')
+
+    return """
 <!DOCTYPE html>
 <html>
 <head>
-<title>Scanner</title>
-<script src="https://unpkg.com/html5-qrcode"></script>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Scanner PRO</title>
 </head>
 
 <body style="text-align:center;font-family:Arial">
 
-<h2>📷 Scanner</h2>
+<h2>📷 Scanner PRO</h2>
 
-<div id="reader" style="width:300px;margin:auto;"></div>
+<video id="video" autoplay playsinline style="width:300px;border:2px solid black;"></video>
 
-<br>
-<button onclick="trocarCamera()">🔄 Trocar Câmera</button>
+<br><br>
+<button onclick="trocarCamera()">🔄 Trocar</button>
 
-<h2 id="status">Aguardando leitura...</h2>
+<h2 id="status">Aguardando...</h2>
 <h3 id="raw"></h3>
 
 <br>
-<a href="/dashboard">📊 Ir para Painel</a>
+<a href="/dashboard">📊 Painel</a>
 
 <script>
-let scanner;
+let video = document.getElementById("video");
+let stream;
 let cameras = [];
-let cameraIndex = 0;
+let index = 0;
 
-function iniciar(cameraId){
-    scanner = new Html5Qrcode("reader");
-
-    scanner.start(cameraId, { fps:10, qrbox:250 }, (text)=>{
-
-        document.getElementById("raw").innerText = "RAW: " + text;
-
-        fetch('/scan', {
-            method:'POST',
-            headers:{'Content-Type':'application/json'},
-            body: JSON.stringify({code:text})
-        })
-        .then(r=>r.json())
-        .then(resp=>{
-            document.getElementById("status").innerText = resp.msg;
-        });
-
-        let audio = new Audio("https://www.soundjay.com/buttons/sounds/beep-07.mp3");
-        audio.play();
-    });
+async function listar(){
+    let devices = await navigator.mediaDevices.enumerateDevices();
+    cameras = devices.filter(d => d.kind === "videoinput");
 }
 
-function start(){
-    Html5Qrcode.getCameras().then(devices => {
-        cameras = devices;
+async function iniciar(){
+    if(stream){
+        stream.getTracks().forEach(t => t.stop());
+    }
 
-        let traseira = devices.find(d =>
-            d.label.toLowerCase().includes("back")
-        );
-
-        cameraIndex = traseira ? devices.indexOf(traseira) : 0;
-
-        iniciar(devices[cameraIndex].id);
+    stream = await navigator.mediaDevices.getUserMedia({
+        video: { deviceId: cameras[index]?.deviceId }
     });
+
+    video.srcObject = stream;
+
+    ler();
 }
 
 function trocarCamera(){
-    scanner.stop().then(() => {
-        cameraIndex = (cameraIndex + 1) % cameras.length;
-        iniciar(cameras[cameraIndex].id);
-    });
+    index = (index + 1) % cameras.length;
+    iniciar();
 }
 
-start();
+async function ler(){
+    if (!('BarcodeDetector' in window)) {
+        document.getElementById("status").innerText = "❌ Navegador não suporta";
+        return;
+    }
+
+    const detector = new BarcodeDetector({
+        formats: ['qr_code','code_128','ean_13']
+    });
+
+    setInterval(async ()=>{
+        try{
+            let codes = await detector.detect(video);
+
+            if(codes.length > 0){
+                let text = codes[0].rawValue;
+
+                document.getElementById("raw").innerText = text;
+
+                fetch('/scan',{
+                    method:'POST',
+                    headers:{'Content-Type':'application/json'},
+                    body:JSON.stringify({code:text})
+                })
+                .then(r=>r.json())
+                .then(d=>{
+                    document.getElementById("status").innerText = d.msg;
+                });
+
+                new Audio("https://www.soundjay.com/buttons/sounds/beep-07.mp3").play();
+            }
+        }catch(e){}
+    },1000);
+}
+
+listar().then(iniciar);
 </script>
 
 </body>
 </html>
-""")
+"""
 
 # =========================
 # SCAN
 # =========================
 @app.route('/scan', methods=['POST'])
 def scan():
-    raw = request.json.get('code', '')
-    texto = raw.upper()
+    if not protegido():
+        return {"msg":"❌ login"}
 
-    agora = datetime.now().strftime("%H:%M:%S")
+    raw = request.json.get('code','')
+    texto = raw.upper()
 
     match = re.search(r"PACOTE\\s*N.?\\s*(\\d+)\\s*-\\s*(\\d+)", texto)
 
     if match:
         pacote = match.group(1)
         obra = match.group(2)
-        caixa = "1"
     else:
         numeros = re.findall(r"\\d+", texto)
         if len(numeros) >= 2:
             pacote = numeros[0]
             obra = numeros[1]
-            caixa = "1"
         else:
-            return {"msg": "❌ NÃO RECONHECIDO"}
+            return {"msg":"❌ não reconhecido"}
 
-    codigo = f"{obra}.{caixa}-{pacote}"
+    codigo = f"{obra}.1-{pacote}"
+    data = datetime.now().strftime("%Y-%m-%d")
+    hora = datetime.now().strftime("%H:%M:%S")
 
-    for l in leituras:
-        if l["codigo"] == codigo:
-            return {"msg": f"⚠️ DUPLICADO: {codigo}"}
+    conn = get_db()
+    cur = conn.cursor()
 
-    leituras.append({
-        "codigo": codigo,
-        "obra": obra,
-        "caixa": caixa,
-        "pacote": pacote,
-        "hora": agora
-    })
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS leituras(
+        id SERIAL PRIMARY KEY,
+        codigo TEXT UNIQUE,
+        obra TEXT,
+        pacote TEXT,
+        data TEXT,
+        hora TEXT
+    )
+    """)
 
-    return {"msg": f"✅ {codigo}"}
+    try:
+        cur.execute("""
+        INSERT INTO leituras (codigo, obra, pacote, data, hora)
+        VALUES (%s,%s,%s,%s,%s)
+        """,(codigo,obra,pacote,data,hora))
+        conn.commit()
+    except:
+        conn.rollback()
+        return {"msg":f"⚠️ DUPLICADO {codigo}"}
+
+    cur.close()
+    conn.close()
+
+    return {"msg":f"✅ {codigo}"}
 
 # =========================
 # DADOS
 # =========================
 @app.route('/dados')
 def dados():
-    return jsonify(leituras)
+    if not protegido():
+        return []
+
+    data = request.args.get('data')
+
+    conn = get_db()
+    cur = conn.cursor()
+
+    if data:
+        cur.execute("SELECT codigo,obra,pacote,data,hora FROM leituras WHERE data=%s",(data,))
+    else:
+        cur.execute("SELECT codigo,obra,pacote,data,hora FROM leituras")
+
+    rows = cur.fetchall()
+
+    cur.close()
+    conn.close()
+
+    return jsonify([{
+        "codigo":r[0],
+        "obra":r[1],
+        "pacote":r[2],
+        "data":r[3],
+        "hora":r[4]
+    } for r in rows])
 
 # =========================
 # DASHBOARD
 # =========================
 @app.route('/dashboard')
 def dashboard():
-    return render_template_string("""
-<!DOCTYPE html>
-<html>
-<head>
-<title>Painel</title>
-</head>
+    if not protegido():
+        return redirect('/')
 
-<body style="font-family:Arial">
+    return """
+<h2>📊 Painel</h2>
 
-<h2>📊 Painel de Expedição</h2>
-
-<input type="text" id="busca" placeholder="Pesquisar..." onkeyup="filtrar()">
+<input type="date" id="data">
+<button onclick="carregar()">Filtrar</button>
 
 <br><br>
 
-<button onclick="exportar()">📥 Exportar Excel</button>
-<button onclick="limpar()">🗑 Limpar</button>
+<button onclick="exportar()">📥 Excel</button>
 
 <h3 id="total"></h3>
 
-<table border="1" id="tabela">
+<table border="1">
 <thead>
-<tr>
-<th>Código</th>
-<th>Obra</th>
-<th>Pacote</th>
-<th>Hora</th>
-</tr>
+<tr><th>Código</th><th>Obra</th><th>Pacote</th><th>Data</th></tr>
 </thead>
-<tbody></tbody>
+<tbody id="tb"></tbody>
 </table>
 
 <script>
 function carregar(){
-    fetch('/dados')
+    let d=document.getElementById("data").value;
+    fetch('/dados?data='+d)
     .then(r=>r.json())
     .then(lista=>{
+        let tb=document.getElementById("tb");
+        tb.innerHTML="";
 
-        let tbody = document.querySelector("#tabela tbody");
-        tbody.innerHTML = "";
+        let cont={};
 
-        let contagem = {};
-
-        lista.forEach(item=>{
-
-            let tr = `<tr>
-                <td>${item.codigo}</td>
-                <td>${item.obra}</td>
-                <td>${item.pacote}</td>
-                <td>${item.hora}</td>
+        lista.forEach(l=>{
+            tb.innerHTML+=`<tr>
+            <td>${l.codigo}</td>
+            <td>${l.obra}</td>
+            <td>${l.pacote}</td>
+            <td>${l.data}</td>
             </tr>`;
 
-            tbody.innerHTML += tr;
-
-            contagem[item.obra] = (contagem[item.obra] || 0) + 1;
+            cont[l.obra]=(cont[l.obra]||0)+1;
         });
 
-        let texto = "Totais: ";
-        for (let o in contagem){
-            texto += `Obra ${o}: ${contagem[o]} | `;
+        let txt="";
+        for(let o in cont){
+            txt+=`Obra ${o}: ${cont[o]} | `;
         }
 
-        document.getElementById("total").innerText = texto;
-    });
-}
-
-function filtrar(){
-    let input = document.getElementById("busca").value.toLowerCase();
-    let linhas = document.querySelectorAll("#tabela tbody tr");
-
-    linhas.forEach(l=>{
-        l.style.display = l.innerText.toLowerCase().includes(input) ? "" : "none";
+        document.getElementById("total").innerText=txt;
     });
 }
 
 function exportar(){
-    window.location.href = "/exportar";
+    let d=document.getElementById("data").value;
+    window.location="/exportar?data="+d;
 }
 
-function limpar(){
-    fetch('/limpar').then(()=>carregar());
-}
-
-setInterval(carregar, 2000);
 carregar();
 </script>
-
-</body>
-</html>
-""")
+"""
 
 # =========================
-# EXPORTAR EXCEL
+# EXPORTAR
 # =========================
 @app.route('/exportar')
 def exportar():
+    data = request.args.get('data')
+
+    conn = get_db()
+    cur = conn.cursor()
+
+    if data:
+        cur.execute("SELECT codigo,obra,pacote,data,hora FROM leituras WHERE data=%s",(data,))
+    else:
+        cur.execute("SELECT codigo,obra,pacote,data,hora FROM leituras")
+
+    rows = cur.fetchall()
+
     wb = Workbook()
     ws = wb.active
+    ws.append(["Código","Obra","Pacote","Data","Hora"])
 
-    ws.append(["Código", "Obra", "Pacote", "Hora"])
-
-    for l in leituras:
-        ws.append([l["codigo"], l["obra"], l["pacote"], l["hora"]])
+    for r in rows:
+        ws.append(r)
 
     file = io.BytesIO()
     wb.save(file)
     file.seek(0)
 
-    return send_file(file, download_name="expedicao.xlsx", as_attachment=True)
+    return send_file(file, download_name="relatorio.xlsx", as_attachment=True)
 
 # =========================
-# LIMPAR
+# PWA
 # =========================
-@app.route('/limpar')
-def limpar():
-    leituras.clear()
-    return {"msg":"ok"}
+@app.route('/manifest.json')
+def manifest():
+    return jsonify({
+        "name":"Scanner Expedição",
+        "short_name":"Scanner",
+        "start_url":"/",
+        "display":"standalone"
+    })
 
 if __name__ == '__main__':
     app.run()
