@@ -9,9 +9,6 @@ app = Flask(__name__)
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
-# =========================
-# 🔗 BANCO OU MODO LOCAL
-# =========================
 def get_db():
     if DATABASE_URL:
         return psycopg2.connect(DATABASE_URL)
@@ -20,7 +17,7 @@ def get_db():
 leituras_memoria = []
 
 # =========================
-# 📷 SCANNER
+# 📷 SCANNER PROFISSIONAL
 # =========================
 @app.route('/')
 def index():
@@ -28,7 +25,7 @@ def index():
 <!DOCTYPE html>
 <html>
 <head>
-<title>Scanner</title>
+<title>Scanner Expedição</title>
 <script src="https://unpkg.com/html5-qrcode"></script>
 </head>
 
@@ -38,38 +35,81 @@ def index():
 
 <div id="reader" style="width:320px;margin:auto;"></div>
 
-<h2 id="status">Aguardando leitura...</h2>
+<br>
+<button onclick="trocarCamera()">🔄 Trocar Câmera</button>
+
+<h2 id="status">Inicializando câmera...</h2>
 
 <br>
 <a href="/dashboard">📊 Painel</a> |
 <a href="/relatorio">📑 Relatório</a>
 
 <script>
-let ultima = "";
+let html5QrCode;
+let cameras = [];
+let cameraIndex = 0;
 
-function onScanSuccess(decodedText) {
+function iniciar(cameraId){
+    html5QrCode = new Html5Qrcode("reader");
 
-    let codigo = decodedText.trim();
+    html5QrCode.start(
+        cameraId,
+        { fps: 10, qrbox: 250 },
+        (decodedText) => {
 
-    if (codigo === ultima) return;
-    ultima = codigo;
+            fetch('/scan', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({code: decodedText})
+            })
+            .then(r => r.json())
+            .then(resp => {
+                document.getElementById("status").innerText = resp.msg;
+            });
 
-    fetch('/scan', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({code: codigo})
-    })
-    .then(r => r.json())
-    .then(resp => {
-        document.getElementById("status").innerText = resp.msg;
+            let audio = new Audio("https://www.soundjay.com/buttons/sounds/beep-07.mp3");
+            audio.play();
+        }
+    ).catch(err => {
+        document.getElementById("status").innerText = "Erro: " + err;
     });
-
-    let audio = new Audio("https://www.soundjay.com/buttons/sounds/beep-07.mp3");
-    audio.play();
 }
 
-let scanner = new Html5QrcodeScanner("reader", { fps: 10, qrbox: 250 });
-scanner.render(onScanSuccess);
+function startScanner(){
+    Html5Qrcode.getCameras().then(devices => {
+
+        cameras = devices;
+
+        if (!devices.length){
+            document.getElementById("status").innerText = "Nenhuma câmera encontrada";
+            return;
+        }
+
+        // 🔥 tenta pegar traseira
+        let traseira = devices.find(d =>
+            d.label.toLowerCase().includes("back") ||
+            d.label.toLowerCase().includes("traseira")
+        );
+
+        cameraIndex = traseira ? devices.indexOf(traseira) : 0;
+
+        iniciar(devices[cameraIndex].id);
+
+    }).catch(err => {
+        document.getElementById("status").innerText = "Erro câmera: " + err;
+    });
+}
+
+function trocarCamera(){
+    if (!cameras.length) return;
+
+    html5QrCode.stop().then(() => {
+        cameraIndex = (cameraIndex + 1) % cameras.length;
+        iniciar(cameras[cameraIndex].id);
+    });
+}
+
+startScanner();
 </script>
 
 </body>
@@ -99,7 +139,6 @@ def scan():
 
         conn = get_db()
 
-        # 🔹 COM BANCO
         if conn:
             cur = conn.cursor()
             try:
@@ -127,8 +166,6 @@ def scan():
             finally:
                 cur.close()
                 conn.close()
-
-        # 🔹 SEM BANCO (MEMÓRIA)
         else:
             for item in leituras_memoria:
                 if item["codigo"] == codigo:
@@ -167,7 +204,7 @@ def dados():
     return jsonify({"lista": lista})
 
 # =========================
-# 🖥️ DASHBOARD
+# 📊 DASHBOARD TOP
 # =========================
 @app.route('/dashboard')
 def dashboard():
@@ -176,10 +213,12 @@ def dashboard():
 <head>
 <style>
 body { background:#0f172a; color:white; font-family:Arial; }
-.grid { display:grid; grid-template-columns: repeat(auto-fill, minmax(250px,1fr)); gap:20px; padding:20px;}
+.grid { display:grid; grid-template-columns: repeat(auto-fill, minmax(280px,1fr)); gap:20px; padding:20px;}
 .card { background:#1e293b; padding:20px; border-radius:15px;}
 .ok { color:#22c55e;}
 .andamento { color:#facc15;}
+.faltando { color:#ef4444;}
+.small { font-size:14px; opacity:0.8;}
 </style>
 </head>
 
@@ -201,23 +240,57 @@ fetch('/dados')
         let chave = item.obra+"-"+item.caixa;
 
         if(!grupos[chave]){
-            grupos[chave]={...item,lidos:0};
+            grupos[chave]={
+                obra:item.obra,
+                caixa:item.caixa,
+                total: parseInt(item.total) || 0,
+                lidos: new Set()
+            };
         }
 
-        grupos[chave].lidos++;
+        grupos[chave].lidos.add(item.pacote);
     });
 
     for(let g in grupos){
         let item = grupos[g];
-        let status = (item.lidos == item.total) ? "ok" : "andamento";
+
+        let lidos = item.lidos.size;
+        let total = item.total;
+
+        let faltando = [];
+        for(let i=1;i<=total;i++){
+            if(!item.lidos.has(String(i))){
+                faltando.push(i);
+            }
+        }
+
+        let statusClass = "faltando";
+        let statusText = "🔴 Faltando";
+
+        if(lidos == total){
+            statusClass = "ok";
+            statusText = "🟢 Completo";
+        } else if(lidos > 0){
+            statusClass = "andamento";
+            statusText = "🟡 Em andamento";
+        }
 
         let div = document.createElement("div");
         div.className="card";
+
         div.innerHTML = `
         <h2>Obra ${item.obra}</h2>
         <h3>Caixa ${item.caixa}</h3>
-        <h1 class="${status}">${item.lidos}/${item.total}</h1>
+
+        <h1 class="${statusClass}">${lidos}/${total}</h1>
+
+        <div class="small">${statusText}</div>
+
+        <div class="small">
+            Faltando: ${faltando.length ? faltando.join(", ") : "Nenhum"}
+        </div>
         `;
+
         grid.appendChild(div);
     }
 });
@@ -280,8 +353,5 @@ def exportar():
 
     return send_file(arquivo, as_attachment=True)
 
-# =========================
-# START
-# =========================
 if __name__ == '__main__':
     app.run()
