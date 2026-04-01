@@ -60,10 +60,8 @@ function start(){
 
         cameras = devices;
 
-        // 🔥 PRIORIZA TRASEIRA
         let traseira = devices.find(d =>
-            d.label.toLowerCase().includes("back") ||
-            d.label.toLowerCase().includes("traseira")
+            d.label.toLowerCase().includes("back")
         );
 
         cameraIndex = traseira ? devices.indexOf(traseira) : 0;
@@ -87,39 +85,51 @@ start();
 """)
 
 # =========================
-# SCAN UNIVERSAL
+# SCAN AJUSTADO PRO SEU QR
 # =========================
 @app.route('/scan', methods=['POST'])
 def scan():
     raw = request.json.get('code', '')
     texto = raw.upper()
 
-    numeros = re.findall(r"\d+", texto)
+    agora = datetime.now().strftime("%H:%M:%S")
 
-    if len(numeros) >= 3:
-        obra = numeros[0]
-        caixa = numeros[1]
-        pacote = numeros[2]
-        total = numeros[3] if len(numeros) > 3 else "?"
+    # 🔥 CASO: PACOTE Nº29 - 1143
+    match = re.search(r"PACOTE\\s*N.?\\s*(\\d+)\\s*-\\s*(\\d+)", texto)
 
-        codigo = f"{obra}.{caixa}-{pacote}"
+    if match:
+        pacote = match.group(1)
+        obra = match.group(2)
+        caixa = "1"
+        total = "?"
 
-        for l in leituras:
-            if l["codigo"] == codigo:
-                return {"msg": f"⚠️ DUPLICADO: {codigo}"}
+    else:
+        # fallback universal
+        numeros = re.findall(r"\\d+", texto)
 
-        leituras.append({
-            "codigo": codigo,
-            "obra": obra,
-            "caixa": caixa,
-            "pacote": pacote,
-            "total": total,
-            "hora": datetime.now().strftime("%H:%M:%S")
-        })
+        if len(numeros) >= 2:
+            pacote = numeros[0]
+            obra = numeros[1]
+            caixa = "1"
+            total = "?"
+        else:
+            return {"msg": f"❌ NÃO RECONHECIDO"}
 
-        return {"msg": f"✅ {codigo}"}
+    codigo = f"{obra}.{caixa}-{pacote}"
 
-    return {"msg": f"❌ NÃO RECONHECIDO"}
+    for l in leituras:
+        if l["codigo"] == codigo:
+            return {"msg": f"⚠️ DUPLICADO: {codigo}"}
+
+    leituras.append({
+        "codigo": codigo,
+        "obra": obra,
+        "caixa": caixa,
+        "pacote": pacote,
+        "hora": agora
+    })
+
+    return {"msg": f"✅ {codigo}"}
 
 @app.route('/dados')
 def dados():
