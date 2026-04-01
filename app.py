@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, send_file, redirect, session
+from flask import Flask, request, jsonify, send_file, redirect
 from flask import render_template_string
 from datetime import datetime
 import psycopg2
@@ -8,7 +8,6 @@ from openpyxl import Workbook
 import io
 
 app = Flask(__name__)
-app.secret_key = "expedicao123"
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
@@ -16,35 +15,17 @@ def get_db():
     return psycopg2.connect(DATABASE_URL)
 
 # =========================
-# LOGIN
+# REDIRECIONA DIRETO PARA SCANNER
 # =========================
-@app.route('/', methods=['GET','POST'])
-def login():
-    if request.method == 'POST':
-        if request.form['user'] == "admin" and request.form['senha'] == "123":
-            session['logado'] = True
-            return redirect('/scanner')
-
-    return """
-    <h2>Login</h2>
-    <form method="post">
-        <input name="user" placeholder="Usuário"><br><br>
-        <input name="senha" type="password" placeholder="Senha"><br><br>
-        <button>Entrar</button>
-    </form>
-    """
-
-def protegido():
-    return 'logado' in session
+@app.route('/')
+def home():
+    return redirect('/scanner')
 
 # =========================
-# SCANNER FORÇADO TRASEIRO
+# SCANNER (CÂMERA TRASEIRA)
 # =========================
 @app.route('/scanner')
 def scanner():
-    if not protegido():
-        return redirect('/')
-
     return """
 <!DOCTYPE html>
 <html>
@@ -56,12 +37,12 @@ def scanner():
 
 <body style="text-align:center;font-family:Arial">
 
-<h2>📷 Scanner (Traseira)</h2>
+<h2>📷 Scanner</h2>
 
 <video id="video" autoplay playsinline style="width:320px;"></video>
 <div id="reader" style="width:320px;margin:auto;display:none;"></div>
 
-<h2 id="status">Iniciando câmera traseira...</h2>
+<h2 id="status">Iniciando câmera...</h2>
 <h3 id="raw"></h3>
 
 <br>
@@ -75,24 +56,16 @@ let stream;
 async function iniciarCamera(){
 
     try{
-        // FORÇA câmera traseira
         stream = await navigator.mediaDevices.getUserMedia({
-            video: {
-                facingMode: { exact: "environment" }
-            }
+            video: { facingMode: { exact: "environment" } }
         });
-
     }catch(e){
-        // fallback se não suportar exact
         stream = await navigator.mediaDevices.getUserMedia({
-            video: {
-                facingMode: "environment"
-            }
+            video: { facingMode: "environment" }
         });
     }
 
     video.srcObject = stream;
-
     iniciarLeitura();
 }
 
@@ -105,7 +78,7 @@ function iniciarLeitura(){
             formats: ['qr_code','code_128','ean_13']
         });
 
-        document.getElementById("status").innerText = "Scanner rápido ativo";
+        document.getElementById("status").innerText = "Scanner ativo";
 
         setInterval(async ()=>{
             try{
@@ -134,10 +107,7 @@ function iniciarFallback(){
 
     scanner.start(
         { facingMode: "environment" },
-        {
-            fps: 15,
-            qrbox: { width: 250, height: 250 }
-        },
+        { fps: 15, qrbox: { width: 250, height: 250 } },
         (text) => processar(text)
     );
 }
@@ -168,17 +138,14 @@ iniciarCamera();
 """
 
 # =========================
-# SCAN (MELHORADO)
+# PROCESSAMENTO DO QR
 # =========================
 @app.route('/scan', methods=['POST'])
 def scan():
-    if not protegido():
-        return {"msg":"❌ login"}
 
     raw = request.json.get('code','')
     texto = raw.upper().strip()
 
-    # 🔥 SUPER REGEX (aceita variações)
     match = re.search(r"(?:PACOTE\\s*N.?\\s*)?(\\d+)\\s*[-–]\\s*(\\d+)", texto)
 
     if match:
@@ -227,12 +194,10 @@ def scan():
     return {"msg":f"✅ {codigo}"}
 
 # =========================
-# DASHBOARD + EXPORTAÇÃO
+# DADOS
 # =========================
 @app.route('/dados')
 def dados():
-    if not protegido():
-        return []
 
     data = request.args.get('data')
 
@@ -257,11 +222,11 @@ def dados():
         "hora":r[4]
     } for r in rows])
 
+# =========================
+# DASHBOARD
+# =========================
 @app.route('/dashboard')
 def dashboard():
-    if not protegido():
-        return redirect('/')
-
     return """
 <h2>📊 Painel</h2>
 
@@ -318,8 +283,12 @@ carregar();
 </script>
 """
 
+# =========================
+# EXPORTAR
+# =========================
 @app.route('/exportar')
 def exportar():
+
     conn = get_db()
     cur = conn.cursor()
 
