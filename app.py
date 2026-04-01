@@ -21,7 +21,7 @@ def home():
     return redirect('/scanner')
 
 # =========================
-# SCANNER TURBO
+# SCANNER PROFISSIONAL (FIX SAMSUNG)
 # =========================
 @app.route('/scanner')
 def scanner():
@@ -31,15 +31,20 @@ def scanner():
 <head>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Scanner PRO</title>
+
 <script src="https://unpkg.com/html5-qrcode"></script>
+
+<style>
+body { text-align:center; font-family:Arial; }
+#reader { width:320px; margin:auto; }
+</style>
 </head>
 
-<body style="text-align:center;font-family:Arial">
+<body>
 
-<h2>📷 Scanner</h2>
+<h2>📷 Scanner Profissional</h2>
 
-<video id="video" autoplay playsinline style="width:320px;"></video>
-<div id="reader" style="width:320px;margin:auto;display:none;"></div>
+<div id="reader"></div>
 
 <h2 id="status">Iniciando câmera...</h2>
 <h3 id="raw"></h3>
@@ -48,70 +53,34 @@ def scanner():
 <a href="/dashboard">📊 Painel</a>
 
 <script>
-let video = document.getElementById("video");
+
+let ultimo = "";
 
 // ======================
-async function iniciarCamera(){
-
-    let constraints = {
-        video: {
-            facingMode: "environment",
-            width: { ideal: 1280 },
-            height: { ideal: 720 },
-            focusMode: "continuous"
-        }
-    };
-
-    try{
-        let stream = await navigator.mediaDevices.getUserMedia(constraints);
-        video.srcObject = stream;
-    }catch(e){
-        video.style.display = "none";
-        iniciarFallback();
-        return;
-    }
-
-    iniciarLeitura();
-}
-
-// ======================
-function iniciarLeitura(){
-
-    if ('BarcodeDetector' in window) {
-
-        const detector = new BarcodeDetector({
-            formats: ['qr_code','code_128','ean_13']
-        });
-
-        document.getElementById("status").innerText = "Scanner TURBO ativo";
-
-        setInterval(async ()=>{
-            try{
-                let codes = await detector.detect(video);
-
-                if(codes.length > 0){
-                    processar(codes[0].rawValue);
-                }
-            }catch(e){}
-        },300);
-
-    } else {
-        iniciarFallback();
-    }
-}
-
-// ======================
-function iniciarFallback(){
-
-    document.getElementById("reader").style.display = "block";
+function iniciar(){
 
     let scanner = new Html5Qrcode("reader");
 
     scanner.start(
         { facingMode: "environment" },
-        { fps: 20, qrbox: 250 },
-        (text) => processar(text)
-    );
+        {
+            fps: 20,
+            qrbox: { width: 280, height: 280 }
+        },
+        (text) => {
+
+            if(text === ultimo) return; // evita duplicado rápido
+            ultimo = text;
+
+            processar(text);
+
+            setTimeout(()=>{ ultimo = ""; }, 1500);
+        }
+    ).then(()=>{
+        document.getElementById("status").innerText = "📷 Pronto para leitura";
+    }).catch(()=>{
+        document.getElementById("status").innerText = "❌ Erro na câmera";
+    });
 }
 
 // ======================
@@ -132,7 +101,8 @@ function processar(text){
     new Audio("https://www.soundjay.com/buttons/sounds/beep-07.mp3").play();
 }
 
-iniciarCamera();
+iniciar();
+
 </script>
 
 </body>
@@ -140,7 +110,7 @@ iniciarCamera();
 """
 
 # =========================
-# LEITURA (SUPER FLEXÍVEL)
+# PROCESSAMENTO DO QR
 # =========================
 @app.route('/scan', methods=['POST'])
 def scan():
@@ -148,14 +118,13 @@ def scan():
     raw = request.json.get('code','')
     texto = raw.upper().strip()
 
-    # 🔥 PEGA QUALQUER PADRÃO COM NÚMEROS
     numeros = re.findall(r"\d+", texto)
 
     if len(numeros) >= 2:
         pacote = numeros[0]
         obra = numeros[1]
     else:
-        return {"msg":f"❌ NÃO RECONHECIDO: {texto}"}
+        return {"msg":f"❌ NÃO RECONHECIDO"}
 
     codigo = f"{obra}.1-{pacote}"
 
@@ -225,7 +194,7 @@ def dashboard():
 
 🔍 <input type="text" id="busca" placeholder="Pesquisar código ou obra">
 
-<button onclick="exportar()">Excel</button>
+<button onclick="exportar()">📥 Excel</button>
 
 <h3 id="total"></h3>
 
