@@ -7,38 +7,17 @@ from openpyxl import Workbook
 
 app = Flask(__name__)
 
-# =========================
-# 🔗 BANCO (POSTGRES RENDER)
-# =========================
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
+# =========================
+# 🔗 BANCO OU MODO LOCAL
+# =========================
 def get_db():
-    return psycopg2.connect(DATABASE_URL)
+    if DATABASE_URL:
+        return psycopg2.connect(DATABASE_URL)
+    return None
 
-# =========================
-# 🗄️ CRIAR TABELA
-# =========================
-def criar_banco():
-    conn = get_db()
-    cur = conn.cursor()
-
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS leituras (
-        id SERIAL PRIMARY KEY,
-        codigo TEXT UNIQUE,
-        obra TEXT,
-        caixa TEXT,
-        pacote TEXT,
-        total TEXT,
-        data TEXT
-    )
-    """)
-
-    conn.commit()
-    cur.close()
-    conn.close()
-
-criar_banco()
+leituras_memoria = []
 
 # =========================
 # 📷 SCANNER
@@ -85,7 +64,6 @@ function onScanSuccess(decodedText) {
         document.getElementById("status").innerText = resp.msg;
     });
 
-    // 🔊 BIP
     let audio = new Audio("https://www.soundjay.com/buttons/sounds/beep-07.mp3");
     audio.play();
 }
@@ -99,7 +77,7 @@ scanner.render(onScanSuccess);
 """)
 
 # =========================
-# 📥 PROCESSAR SCAN
+# 📥 SCAN
 # =========================
 @app.route('/scan', methods=['POST'])
 def scan():
@@ -120,18 +98,49 @@ def scan():
         codigo = f"{obra}.{caixa}-{pacote}"
 
         conn = get_db()
-        cur = conn.cursor()
 
-        try:
-            cur.execute("""
-                INSERT INTO leituras (codigo, obra, caixa, pacote, total, data)
-                VALUES (%s,%s,%s,%s,%s,%s)
-            """, (codigo, obra, caixa, pacote, total, agora))
+        # 🔹 COM BANCO
+        if conn:
+            cur = conn.cursor()
+            try:
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS leituras (
+                        id SERIAL PRIMARY KEY,
+                        codigo TEXT UNIQUE,
+                        obra TEXT,
+                        caixa TEXT,
+                        pacote TEXT,
+                        total TEXT,
+                        data TEXT
+                    )
+                """)
 
-            conn.commit()
-        except:
-            conn.rollback()
-            return {"msg": f"⚠️ DUPLICADO: {codigo}"}
+                cur.execute("""
+                    INSERT INTO leituras (codigo, obra, caixa, pacote, total, data)
+                    VALUES (%s,%s,%s,%s,%s,%s)
+                """, (codigo, obra, caixa, pacote, total, agora))
+
+                conn.commit()
+            except:
+                conn.rollback()
+                return {"msg": f"⚠️ DUPLICADO: {codigo}"}
+            finally:
+                cur.close()
+                conn.close()
+
+        # 🔹 SEM BANCO (MEMÓRIA)
+        else:
+            for item in leituras_memoria:
+                if item["codigo"] == codigo:
+                    return {"msg": f"⚠️ DUPLICADO: {codigo}"}
+
+            leituras_memoria.append({
+                "codigo": codigo,
+                "obra": obra,
+                "caixa": caixa,
+                "pacote": pacote,
+                "total": total
+            })
 
         return {"msg": f"✅ {codigo} → {pacote}/{total}"}
 
@@ -143,19 +152,17 @@ def scan():
 @app.route('/dados')
 def dados():
     conn = get_db()
-    cur = conn.cursor()
 
-    cur.execute("SELECT obra, caixa, pacote, total FROM leituras")
-    rows = cur.fetchall()
+    if conn:
+        cur = conn.cursor()
+        cur.execute("SELECT obra, caixa, pacote, total FROM leituras")
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
 
-    lista = []
-    for r in rows:
-        lista.append({
-            "obra": r[0],
-            "caixa": r[1],
-            "pacote": r[2],
-            "total": r[3]
-        })
+        lista = [{"obra": r[0], "caixa": r[1], "pacote": r[2], "total": r[3]} for r in rows]
+    else:
+        lista = leituras_memoria
 
     return jsonify({"lista": lista})
 
@@ -245,15 +252,20 @@ def relatorio():
 """)
 
 # =========================
-# 📥 EXPORTAR EXCEL
+# 📥 EXPORTAR
 # =========================
 @app.route('/exportar')
 def exportar():
     conn = get_db()
-    cur = conn.cursor()
 
-    cur.execute("SELECT * FROM leituras")
-    rows = cur.fetchall()
+    if conn:
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM leituras")
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+    else:
+        rows = [(i, d["codigo"], d["obra"], d["caixa"], d["pacote"], d["total"], "") for i, d in enumerate(leituras_memoria, 1)]
 
     wb = Workbook()
     ws = wb.active
@@ -269,7 +281,7 @@ def exportar():
     return send_file(arquivo, as_attachment=True)
 
 # =========================
-# 🚀 START
+# START
 # =========================
 if __name__ == '__main__':
     app.run()
