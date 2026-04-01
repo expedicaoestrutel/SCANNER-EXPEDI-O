@@ -1,5 +1,4 @@
 from flask import Flask, request, jsonify, send_file, redirect
-from flask import render_template_string
 from datetime import datetime
 import psycopg2
 import os
@@ -15,14 +14,14 @@ def get_db():
     return psycopg2.connect(DATABASE_URL)
 
 # =========================
-# REDIRECIONA DIRETO PARA SCANNER
+# HOME
 # =========================
 @app.route('/')
 def home():
     return redirect('/scanner')
 
 # =========================
-# SCANNER (CÂMERA TRASEIRA)
+# SCANNER TURBO
 # =========================
 @app.route('/scanner')
 def scanner():
@@ -50,22 +49,28 @@ def scanner():
 
 <script>
 let video = document.getElementById("video");
-let stream;
 
 // ======================
 async function iniciarCamera(){
 
+    let constraints = {
+        video: {
+            facingMode: "environment",
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+            focusMode: "continuous"
+        }
+    };
+
     try{
-        stream = await navigator.mediaDevices.getUserMedia({
-            video: { facingMode: { exact: "environment" } }
-        });
+        let stream = await navigator.mediaDevices.getUserMedia(constraints);
+        video.srcObject = stream;
     }catch(e){
-        stream = await navigator.mediaDevices.getUserMedia({
-            video: { facingMode: "environment" }
-        });
+        video.style.display = "none";
+        iniciarFallback();
+        return;
     }
 
-    video.srcObject = stream;
     iniciarLeitura();
 }
 
@@ -78,7 +83,7 @@ function iniciarLeitura(){
             formats: ['qr_code','code_128','ean_13']
         });
 
-        document.getElementById("status").innerText = "Scanner ativo";
+        document.getElementById("status").innerText = "Scanner TURBO ativo";
 
         setInterval(async ()=>{
             try{
@@ -88,7 +93,7 @@ function iniciarLeitura(){
                     processar(codes[0].rawValue);
                 }
             }catch(e){}
-        },500);
+        },300);
 
     } else {
         iniciarFallback();
@@ -98,16 +103,13 @@ function iniciarLeitura(){
 // ======================
 function iniciarFallback(){
 
-    document.getElementById("status").innerText = "Modo compatibilidade";
-
-    video.style.display = "none";
     document.getElementById("reader").style.display = "block";
 
     let scanner = new Html5Qrcode("reader");
 
     scanner.start(
         { facingMode: "environment" },
-        { fps: 15, qrbox: { width: 250, height: 250 } },
+        { fps: 20, qrbox: 250 },
         (text) => processar(text)
     );
 }
@@ -138,7 +140,7 @@ iniciarCamera();
 """
 
 # =========================
-# PROCESSAMENTO DO QR
+# LEITURA (SUPER FLEXÍVEL)
 # =========================
 @app.route('/scan', methods=['POST'])
 def scan():
@@ -146,18 +148,14 @@ def scan():
     raw = request.json.get('code','')
     texto = raw.upper().strip()
 
-    match = re.search(r"(?:PACOTE\\s*N.?\\s*)?(\\d+)\\s*[-–]\\s*(\\d+)", texto)
+    # 🔥 PEGA QUALQUER PADRÃO COM NÚMEROS
+    numeros = re.findall(r"\d+", texto)
 
-    if match:
-        pacote = match.group(1)
-        obra = match.group(2)
+    if len(numeros) >= 2:
+        pacote = numeros[0]
+        obra = numeros[1]
     else:
-        numeros = re.findall(r"\\d+", texto)
-        if len(numeros) >= 2:
-            pacote = numeros[0]
-            obra = numeros[1]
-        else:
-            return {"msg":"❌ NÃO RECONHECIDO"}
+        return {"msg":f"❌ NÃO RECONHECIDO: {texto}"}
 
     codigo = f"{obra}.1-{pacote}"
 
@@ -199,15 +197,10 @@ def scan():
 @app.route('/dados')
 def dados():
 
-    data = request.args.get('data')
-
     conn = get_db()
     cur = conn.cursor()
 
-    if data:
-        cur.execute("SELECT codigo,obra,pacote,data,hora FROM leituras WHERE data=%s",(data,))
-    else:
-        cur.execute("SELECT codigo,obra,pacote,data,hora FROM leituras")
+    cur.execute("SELECT codigo,obra,pacote,data,hora FROM leituras")
 
     rows = cur.fetchall()
 
@@ -223,15 +216,15 @@ def dados():
     } for r in rows])
 
 # =========================
-# DASHBOARD
+# DASHBOARD COM LUPA
 # =========================
 @app.route('/dashboard')
 def dashboard():
     return """
 <h2>📊 Painel</h2>
 
-<input type="date" id="data">
-<button onclick="carregar()">Filtrar</button>
+🔍 <input type="text" id="busca" placeholder="Pesquisar código ou obra">
+
 <button onclick="exportar()">Excel</button>
 
 <h3 id="total"></h3>
@@ -243,40 +236,55 @@ def dashboard():
 <tbody id="tb"></tbody>
 
 <script>
-function carregar(){
-    let d=document.getElementById("data").value;
+let listaGlobal = [];
 
-    fetch('/dados?data='+d)
+function carregar(){
+    fetch('/dados')
     .then(r=>r.json())
     .then(lista=>{
-        let tb=document.getElementById("tb");
-        tb.innerHTML="";
-
-        let cont={};
-
-        lista.forEach(l=>{
-            tb.innerHTML+=`<tr>
-            <td>${l.codigo}</td>
-            <td>${l.obra}</td>
-            <td>${l.pacote}</td>
-            <td>${l.data}</td>
-            </tr>`;
-
-            cont[l.obra]=(cont[l.obra]||0)+1;
-        });
-
-        let txt="";
-        for(let o in cont){
-            txt+=`Obra ${o}: ${cont[o]} | `;
-        }
-
-        document.getElementById("total").innerText=txt;
+        listaGlobal = lista;
+        render(lista);
     });
 }
 
+function render(lista){
+    let tb=document.getElementById("tb");
+    tb.innerHTML="";
+
+    let cont={};
+
+    lista.forEach(l=>{
+        tb.innerHTML+=`<tr>
+        <td>${l.codigo}</td>
+        <td>${l.obra}</td>
+        <td>${l.pacote}</td>
+        <td>${l.data}</td>
+        </tr>`;
+
+        cont[l.obra]=(cont[l.obra]||0)+1;
+    });
+
+    let txt="";
+    for(let o in cont){
+        txt+=`Obra ${o}: ${cont[o]} | `;
+    }
+
+    document.getElementById("total").innerText=txt;
+}
+
+document.getElementById("busca").addEventListener("input", function(){
+    let termo = this.value.toLowerCase();
+
+    let filtrado = listaGlobal.filter(l =>
+        l.codigo.toLowerCase().includes(termo) ||
+        l.obra.toLowerCase().includes(termo)
+    );
+
+    render(filtrado);
+});
+
 function exportar(){
-    let d=document.getElementById("data").value;
-    window.location="/exportar?data="+d;
+    window.location="/exportar";
 }
 
 carregar();
