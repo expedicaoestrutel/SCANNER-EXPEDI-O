@@ -1,30 +1,19 @@
 from flask import Flask, request, jsonify, send_file, redirect
-import psycopg2
-import os
-import re
+import psycopg2, os, re, io
 from datetime import datetime
 from openpyxl import Workbook
-import io
 
 app = Flask(__name__)
-
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
-def get_db():
+def db():
     return psycopg2.connect(DATABASE_URL)
 
 # =========================
-# HOME
-# =========================
-@app.route('/')
-def home():
-    return redirect('/app')
-
-# =========================
-# CRIAR TABELA
+# CRIAR TABELAS
 # =========================
 def criar():
-    conn = get_db()
+    conn = db()
     cur = conn.cursor()
 
     cur.execute("""
@@ -32,7 +21,15 @@ def criar():
         id SERIAL PRIMARY KEY,
         pacote TEXT,
         codigo TEXT,
+        usuario TEXT,
         data TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS metas(
+        pacote TEXT PRIMARY KEY,
+        quantidade INTEGER
     )
     """)
 
@@ -43,114 +40,140 @@ def criar():
 criar()
 
 # =========================
-# LISTA DE VOLUMES
+# DASHBOARD
 # =========================
 @app.route('/dados')
 def dados():
-
-    conn = get_db()
+    conn = db()
     cur = conn.cursor()
 
     cur.execute("""
-    SELECT pacote, COUNT(*) 
-    FROM leituras
-    GROUP BY pacote
-    ORDER BY pacote
+    SELECT l.pacote,
+           COUNT(l.codigo) as lidos,
+           COALESCE(m.quantidade,0) as meta
+    FROM leituras l
+    LEFT JOIN metas m ON l.pacote = m.pacote
+    GROUP BY l.pacote, m.quantidade
+    ORDER BY l.pacote
     """)
 
     rows = cur.fetchall()
-
     cur.close()
     conn.close()
 
-    lista = []
+    result = []
+    for p, lidos, meta in rows:
+        if meta == 0:
+            status = "andamento"
+        elif lidos >= meta:
+            status = "completo"
+        else:
+            status = "faltando"
 
-    for r in rows:
-        lista.append({
-            "pacote": r[0],
-            "total": r[1]
+        result.append({
+            "pacote": p,
+            "lidos": lidos,
+            "meta": meta,
+            "status": status
         })
 
-    return jsonify(lista)
+    return jsonify(result)
 
 # =========================
-# DETALHE DO VOLUME
+# SALVAR META
 # =========================
-@app.route('/volume/<pacote>')
-def volume(pacote):
+@app.route('/meta', methods=['POST'])
+def meta():
+    pacote = request.json['pacote']
+    qtd = request.json['qtd']
 
-    conn = get_db()
+    conn = db()
     cur = conn.cursor()
 
     cur.execute("""
-    SELECT codigo FROM leituras
-    WHERE pacote=%s
-    ORDER BY id DESC
-    """,(pacote,))
-
-    rows = cur.fetchall()
-
-    cur.close()
-    conn.close()
-
-    return jsonify([r[0] for r in rows])
-
-# =========================
-# SCAN
-# =========================
-@app.route('/scan', methods=['POST'])
-def scan():
-
-    texto = request.json.get('code','').upper().strip()
-
-    conn = get_db()
-    cur = conn.cursor()
-
-    # PACOTE
-    if "PACOTE" in texto:
-
-        nums = re.findall(r"\d+", texto)
-
-        if nums:
-            return {"pacote": nums[0]}
-
-    # PEÇA
-    pacote = request.json.get('pacote')
-
-    if not pacote:
-        return {"msg":"sem pacote"}
-
-    cur.execute("""
-    INSERT INTO leituras (pacote,codigo)
+    INSERT INTO metas (pacote, quantidade)
     VALUES (%s,%s)
-    """,(pacote,texto))
+    ON CONFLICT (pacote)
+    DO UPDATE SET quantidade=%s
+    """,(pacote,qtd,qtd))
 
     conn.commit()
-
     cur.close()
     conn.close()
 
     return {"ok": True}
 
 # =========================
-# EXPORTAR EXCEL POR VOLUME
+# SCAN
 # =========================
-@app.route('/exportar/<pacote>')
-def exportar(pacote):
+@app.route('/scan', methods=['POST'])
+def scan():
+    texto = request.json.get('code','').upper().strip()
+    usuario = request.json.get('usuario','SEM NOME')
 
-    conn = get_db()
+    if "PACOTE" in texto:
+        nums = re.findall(r"\d+", texto)
+        if nums:
+            return {"pacote": nums[0]}
+
+    pacote = request.json.get('pacote')
+    if not pacote:
+        return {"erro":"sem pacote"}
+
+    conn = db()
     cur = conn.cursor()
 
     cur.execute("""
-    SELECT codigo, data FROM leituras
+    INSERT INTO leituras (pacote,codigo,usuario)
+    VALUES (%s,%s,%s)
+    """,(pacote,texto,usuario))
+
+    conn.commit()
+    cur.close()
+    conn.close()
+
+    return {"ok": True}
+
+# =========================
+# DETALHE VOLUME
+# =========================
+@app.route('/volume/<pacote>')
+def volume(pacote):
+    conn = db()
+    cur = conn.cursor()
+
+    cur.execute("""
+    SELECT codigo, usuario, data
+    FROM leituras
     WHERE pacote=%s
+    ORDER BY id DESC
     """,(pacote,))
+
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    return jsonify(rows)
+
+# =========================
+# EXPORTAR
+# =========================
+@app.route('/exportar/<pacote>')
+def exportar(p):
+    conn = db()
+    cur = conn.cursor()
+
+    cur.execute("""
+    SELECT codigo, usuario, data
+    FROM leituras
+    WHERE pacote=%s
+    """,(p,))
 
     rows = cur.fetchall()
 
     wb = Workbook()
     ws = wb.active
-    ws.append(["Código","Data"])
+    ws.append(["Código","Usuário","Data"])
 
     for r in rows:
         ws.append(r)
@@ -160,93 +183,66 @@ def exportar(pacote):
     file.seek(0)
 
     return send_file(file,
-        download_name=f"volume_{pacote}.xlsx",
+        download_name=f"{p}.xlsx",
         as_attachment=True)
 
 # =========================
-# UI PRINCIPAL (ESTILO APP)
+# UI PRINCIPAL
 # =========================
-@app.route('/app')
-def app_ui():
+@app.route('/')
+def home():
     return """
 <!DOCTYPE html>
 <html>
 <head>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-
 <style>
-body { margin:0; font-family:Arial; background:#eee; }
-
-.header {
-    background:#d32f2f;
-    color:white;
-    padding:15px;
-    font-size:20px;
-    text-align:center;
-}
-
-.card {
-    background:white;
-    margin:10px;
-    padding:15px;
-    border-radius:10px;
-}
-
-.fab {
-    position:fixed;
-    bottom:20px;
-    right:20px;
-    background:#f44336;
-    width:60px;
-    height:60px;
-    border-radius:50%;
-    display:flex;
-    align-items:center;
-    justify-content:center;
-    font-size:28px;
-    color:white;
-}
+body { font-family:Arial; background:#eee; margin:0; }
+.header { background:#1e88e5; color:white; padding:15px; text-align:center; }
+.card { padding:15px; margin:10px; border-radius:10px; color:white; }
+.verde { background:#2e7d32; }
+.vermelho { background:#c62828; }
+.amarelo { background:#f9a825; color:black; }
 </style>
 </head>
 
 <body>
 
-<div class="header">Sessões de leitura</div>
+<div class="header">📊 DASHBOARD</div>
+
+<div style="padding:10px;">
+<input id="user" placeholder="Seu nome">
+</div>
 
 <div id="lista"></div>
 
-<div class="fab" onclick="window.location='/scanner'">📷</div>
-
 <script>
+function cor(status){
+    if(status=="completo") return "verde";
+    if(status=="faltando") return "vermelho";
+    return "amarelo";
+}
+
 function carregar(){
-
-    fetch('/dados')
-    .then(r=>r.json())
-    .then(d=>{
-
-        let html="";
-
-        d.forEach(v=>{
-
-            html+=`
-            <div class="card" onclick="abrir('${v.pacote}')">
-                <b>📦 PACOTE ${v.pacote}</b><br>
-                Leituras: ${v.total}<br>
-                <button onclick="exportar('${v.pacote}')">Excel</button>
-            </div>
-            `;
-        });
-
-        document.getElementById("lista").innerHTML=html;
+fetch('/dados')
+.then(r=>r.json())
+.then(d=>{
+    let html="";
+    d.forEach(v=>{
+        html+=`
+        <div class="card ${cor(v.status)}" onclick="abrir('${v.pacote}')">
+            📦 ${v.pacote}<br>
+            ${v.lidos} / ${v.meta}<br>
+            ${v.status}
+        </div>`;
     });
+    document.getElementById("lista").innerHTML=html;
+});
 }
 
 function abrir(p){
-    window.location='/detalhe/'+p;
-}
-
-function exportar(p){
-    window.location='/exportar/'+p;
+    let user = document.getElementById("user").value || "OPERADOR";
+    window.location='/volume-ui/'+p+'?user='+user;
 }
 
 carregar();
@@ -257,91 +253,63 @@ carregar();
 """
 
 # =========================
-# DETALHE
+# TELA VOLUME
 # =========================
-@app.route('/detalhe/<pacote>')
-def detalhe(pacote):
+@app.route('/volume-ui/<pacote>')
+def volume_ui(pacote):
     return f"""
 <!DOCTYPE html>
 <html>
-<head>
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<style>
-body {{ font-family:Arial; }}
-.item {{ padding:10px; border-bottom:1px solid #ccc; }}
-</style>
-</head>
-
 <body>
 
-<h3>📦 PACOTE {pacote}</h3>
+<h3>📦 Volume {pacote}</h3>
+
+<input id="meta" placeholder="Qtd esperada">
+<button onclick="salvarMeta()">Salvar Meta</button>
+
+<input placeholder="Pesquisar..." onkeyup="filtrar(this.value)">
 
 <div id="lista"></div>
 
 <script>
+const url = new URL(window.location.href);
+const user = url.searchParams.get("user");
+
+let dados=[];
+
+function carregar(){
 fetch('/volume/{pacote}')
 .then(r=>r.json())
-.then(d=>{{
-    let html="";
-    d.forEach(p=>html+=`<div class="item">${{p}}</div>`);
-    document.getElementById("lista").innerHTML=html;
-}});
-</script>
-
-</body>
-</html>
-"""
-
-# =========================
-# SCANNER
-# =========================
-@app.route('/scanner')
-def scanner():
-    return """
-<!DOCTYPE html>
-<html>
-<head>
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<script src="https://unpkg.com/html5-qrcode"></script>
-
-<body>
-
-<h3>Scanner</h3>
-<div id="reader"></div>
-
-<script>
-let scanner;
-let pacote="";
-
-function iniciar(){
-    scanner = new Html5Qrcode("reader");
-
-    scanner.start(
-        { facingMode:"environment" },
-        { fps:20, qrbox:250 },
-        (text)=>{
-
-            fetch('/scan',{
-                method:'POST',
-                headers:{'Content-Type':'application/json'},
-                body:JSON.stringify({code:text, pacote:pacote})
-            })
-            .then(r=>r.json())
-            .then(d=>{
-
-                if(d.pacote){
-                    pacote = d.pacote;
-                    alert("PACOTE "+pacote);
-                }
-
-            });
-
-            new Audio("https://www.soundjay.com/buttons/sounds/beep-07.mp3").play();
-        }
-    );
+.then(d=>{
+    dados=d;
+    mostrar(d);
+});
 }
 
-iniciar();
+function mostrar(lista){
+    let html="";
+    lista.forEach(r=>{
+        html+=`<div>${{r[0]}} - 👷 ${{r[1]}}</div>`;
+    });
+    document.getElementById("lista").innerHTML=html;
+}
+
+function filtrar(txt){
+    txt = txt.toUpperCase();
+    let f = dados.filter(x=>x[0].includes(txt));
+    mostrar(f);
+}
+
+function salvarMeta(){
+    let qtd = document.getElementById("meta").value;
+    fetch('/meta',{
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({pacote:"{pacote}", qtd:qtd})
+    }).then(()=>alert("Meta salva"));
+}
+
+carregar();
 </script>
 
 </body>
@@ -349,5 +317,5 @@ iniciar();
 """
 
 # =========================
-if __name__ == '__main__':
+if __name__ == "__main__":
     app.run()
