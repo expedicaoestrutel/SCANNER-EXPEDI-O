@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response
 import psycopg2, os, re
 
 app = Flask(__name__)
@@ -32,7 +32,7 @@ def criar():
 criar()
 
 # =========================
-# PROCESSAR TEXTO
+# TRATAR CODIGO
 # =========================
 def tratar_codigo(txt):
     txt = txt.upper()
@@ -40,9 +40,8 @@ def tratar_codigo(txt):
     obra = None
     codigo = txt
 
-    # OBRA1129-1143 ou 1143-OBRA1129
-    obra_match = re.search(r'OBRA\\s*(\\d+)', txt)
-    cod_match = re.findall(r'\\d+', txt)
+    obra_match = re.search(r'OBRA\s*(\d+)', txt)
+    cod_match = re.findall(r'\d+', txt)
 
     if obra_match:
         obra = obra_match.group(1)
@@ -65,7 +64,7 @@ def scan():
 
     # Detecta pacote
     if "PACOTE" in texto_up:
-        nums = re.findall(r"\\d+", texto_up)
+        nums = re.findall(r"\d+", texto_up)
         if nums:
             return {"novo_pacote": nums[0]}
 
@@ -124,6 +123,67 @@ def realtime():
     return jsonify(dados)
 
 # =========================
+# EXPORTAR DETALHADO
+# =========================
+@app.route('/exportar')
+def exportar():
+    conn = db()
+    cur = conn.cursor()
+
+    cur.execute("""
+    SELECT pacote, obra, codigo, usuario, data
+    FROM leituras
+    ORDER BY pacote, obra
+    """)
+
+    dados = cur.fetchall()
+
+    csv = "PACOTE,OBRA,CODIGO,USUARIO,DATA\n"
+
+    for d in dados:
+        csv += f"{d[0]},{d[1]},{d[2]},{d[3]},{d[4]}\n"
+
+    cur.close()
+    conn.close()
+
+    return Response(
+        csv,
+        mimetype="text/csv",
+        headers={"Content-Disposition": "attachment;filename=expedicao.csv"}
+    )
+
+# =========================
+# EXPORTAR RESUMO
+# =========================
+@app.route('/exportar_resumo')
+def exportar_resumo():
+    conn = db()
+    cur = conn.cursor()
+
+    cur.execute("""
+    SELECT pacote, obra, COUNT(*) as total
+    FROM leituras
+    GROUP BY pacote, obra
+    ORDER BY pacote
+    """)
+
+    dados = cur.fetchall()
+
+    csv = "PACOTE,OBRA,TOTAL\n"
+
+    for d in dados:
+        csv += f"{d[0]},{d[1]},{d[2]}\n"
+
+    cur.close()
+    conn.close()
+
+    return Response(
+        csv,
+        mimetype="text/csv",
+        headers={"Content-Disposition": "attachment;filename=resumo.csv"}
+    )
+
+# =========================
 # UI
 # =========================
 @app.route('/')
@@ -142,7 +202,6 @@ body { margin:0; font-family:Arial; background:#111; color:white; }
 .tag { display:inline-block; background:#2962ff; padding:5px 10px; margin:3px; border-radius:20px; }
 .lista { padding:10px; max-height:250px; overflow:auto; }
 .item { border-bottom:1px solid #333; padding:5px; }
-.dup { color:red; font-weight:bold; }
 </style>
 </head>
 
@@ -159,6 +218,8 @@ body { margin:0; font-family:Arial; background:#111; color:white; }
 <div id="volumes"></div>
 
 <button class="btn" onclick="limpar()">Limpar volumes</button>
+<button class="btn" onclick="exportar()">📄 Exportar</button>
+<button class="btn" onclick="exportarResumo()">📊 Resumo</button>
 </div>
 
 <div class="lista" id="lista"></div>
@@ -196,6 +257,14 @@ function atualizarLista(){
 }
 
 setInterval(atualizarLista,2000);
+
+function exportar(){
+    window.open('/exportar','_blank');
+}
+
+function exportarResumo(){
+    window.open('/exportar_resumo','_blank');
+}
 
 function onScanSuccess(decodedText) {
     fetch('/scan',{
