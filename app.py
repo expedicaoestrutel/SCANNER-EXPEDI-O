@@ -83,12 +83,12 @@ body { margin:0; font-family:Arial; background:#f2f2f2; }
 <input placeholder="🔎 Buscar..." onkeyup="buscar(this.value)">
 </div>
 
-<video id="video"></video>
+<video id="video" playsinline></video>
 
 <div id="lista"></div>
 
 <div class="btn" onclick="iniciar()">📷</div>
-<div class="btn flash" onclick="flash()">⚡</div>
+<div class="btn flash" onclick="toggleFlash()">⚡</div>
 
 <script>
 let reader = new ZXing.BrowserMultiFormatReader();
@@ -98,6 +98,7 @@ let ativos = [];
 
 let stream;
 let travado = false;
+let flashOn = false;
 
 // 🔊 SOM PROFISSIONAL
 function beep(){
@@ -110,82 +111,96 @@ function vibrar(){
     if(navigator.vibrate) navigator.vibrate(100);
 }
 
-// 📷 INICIAR
+// 📷 INICIAR CAMERA (CORRIGIDO)
 async function iniciar(){
 
     let video = document.getElementById("video");
     video.style.display="block";
 
-    const devices = await ZXing.BrowserCodeReader.listVideoInputDevices();
-    const cam = devices[devices.length-1].deviceId;
+    try{
 
-    stream = await navigator.mediaDevices.getUserMedia({
-        video:{ deviceId:cam }
-    });
+        const constraints = {
+            video: {
+                facingMode: { ideal: "environment" },
+                width: { ideal: 1280 },
+                height: { ideal: 720 }
+            }
+        };
 
-    video.srcObject = stream;
+        stream = await navigator.mediaDevices.getUserMedia(constraints);
 
-    reader.decodeFromVideoElement(video,(res,err)=>{
+        video.srcObject = stream;
+        await video.play();
 
-        if(res && !travado){
+        reader.decodeFromVideoElement(video,(res,err)=>{
 
-            travado = true;
+            if(res && !travado){
 
-            let txt = res.getText().toUpperCase();
+                travado = true;
 
-            vibrar(); beep();
+                let txt = res.getText().toUpperCase();
 
-            // 📦 VOLUME
-            if(txt.includes("PACOTE") || txt.includes("CAIXA")){
-                let num = txt.match(/\\d+/);
+                vibrar(); 
+                beep();
 
-                if(num){
-                    let v = num[0];
+                // 📦 SE FOR VOLUME
+                if(txt.includes("PACOTE") || txt.includes("CAIXA")){
 
-                    if(!volumes[v]) volumes[v]=[];
+                    let num = txt.match(/\\d+/);
 
-                    if(!ativos.includes(v)){
-                        ativos.push(v);
+                    if(num){
+                        let v = num[0];
+
+                        if(!volumes[v]) volumes[v] = [];
+
+                        if(!ativos.includes(v)){
+                            ativos.push(v);
+                        }
                     }
 
-                    atualizar();
-                    salvar();
-                }
-            } else {
+                } else {
 
-                if(ativos.length===0){
-                    alert("Selecione um volume primeiro");
-                }
-
-                ativos.forEach(v=>{
-                    if(!volumes[v].includes(txt)){
-                        volumes[v].push(txt);
+                    if(ativos.length === 0){
+                        alert("Leia um volume primeiro (CAIXA/PACOTE)");
                     }
-                });
+
+                    ativos.forEach(v=>{
+                        if(!volumes[v].includes(txt)){
+                            volumes[v].push(txt);
+                        }
+                    });
+                }
 
                 atualizar();
                 salvar();
-            }
 
-            setTimeout(()=>travado=false,800);
-        }
-    });
+                setTimeout(()=>travado=false,800);
+            }
+        });
+
+    }catch(e){
+        alert("Erro câmera: " + e.message);
+    }
 }
 
-// 🔦 FLASH
-function flash(){
+// 🔦 FLASH REAL
+function toggleFlash(){
+
     if(!stream) return;
 
     let track = stream.getVideoTracks()[0];
+
     let cap = track.getCapabilities();
 
     if(!cap.torch){
-        alert("Sem flash");
+        alert("Flash não suportado");
         return;
     }
 
+    flashOn = !flashOn;
+
     track.applyConstraints({
-        advanced:[{torch:true}]
+        advanced: [{ torch: flashOn }]
     });
 }
 
@@ -194,37 +209,37 @@ function salvar(){
     localStorage.setItem("volumes", JSON.stringify(volumes));
 }
 
-// 🔎 BUSCA
+// 🔎 BUSCAR
 function buscar(txt){
 
     txt = txt.toLowerCase();
 
-    let html="";
+    let html = "";
 
     for(let v in volumes){
 
         if(!v.includes(txt)) continue;
 
-        html+=renderVolume(v);
+        html += render(v);
     }
 
     document.getElementById("lista").innerHTML = html;
 }
 
-// 📊 RENDER
+// 📊 ATUALIZAR
 function atualizar(){
 
-    let html="";
+    let html = "";
 
     for(let v in volumes){
-        html+=renderVolume(v);
+        html += render(v);
     }
 
     document.getElementById("lista").innerHTML = html;
 }
 
 // 📦 TEMPLATE
-function renderVolume(v){
+function render(v){
 
     let ativo = ativos.includes(v) ? "active" : "";
 
@@ -235,12 +250,12 @@ function renderVolume(v){
     </div>`;
 }
 
-// 🔄 ATIVAR VOLUME
+// 🔄 ATIVAR/DESATIVAR
 function toggle(v){
 
     if(ativos.includes(v)){
-        ativos = ativos.filter(x=>x!==v);
-    }else{
+        ativos = ativos.filter(x => x !== v);
+    } else {
         ativos.push(v);
     }
 
