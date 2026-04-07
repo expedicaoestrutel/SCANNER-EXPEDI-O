@@ -9,9 +9,6 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 def db():
     return psycopg2.connect(DATABASE_URL)
 
-# =========================
-# CRIAR TABELAS
-# =========================
 def criar():
     conn = db()
     cur = conn.cursor()
@@ -27,27 +24,14 @@ def criar():
     )
     """)
 
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS lista(
-        id SERIAL PRIMARY KEY,
-        obra TEXT,
-        codigo TEXT,
-        qtde INTEGER
-    )
-    """)
-
     conn.commit()
     cur.close()
     conn.close()
 
 criar()
 
-# =========================
-# TRATAR CÓDIGO
-# =========================
 def tratar_codigo(txt):
     txt = txt.upper()
-
     obra = None
     codigo = txt
 
@@ -62,9 +46,6 @@ def tratar_codigo(txt):
 
     return codigo, obra
 
-# =========================
-# SCAN (SERVIDOR)
-# =========================
 @app.route('/scan', methods=['POST'])
 def scan():
     texto = request.json.get('code','').strip()
@@ -111,9 +92,6 @@ def scan():
 
     return {"ok": True}
 
-# =========================
-# EXPORTAR EXCEL
-# =========================
 @app.route('/exportar_excel')
 def exportar_excel():
     conn = db()
@@ -133,52 +111,6 @@ def exportar_excel():
         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition":"attachment;filename=expedicao.xlsx"})
 
-# =========================
-# EXPORTAR SEPARAÇÃO
-# =========================
-@app.route('/exportar_obra')
-def exportar_obra():
-    conn = db()
-    cur = conn.cursor()
-
-    cur.execute("""
-    SELECT obra, pacote, codigo
-    FROM leituras
-    ORDER BY obra, pacote
-    """)
-
-    dados = cur.fetchall()
-
-    estrutura = {}
-
-    for obra, pacote, codigo in dados:
-        estrutura.setdefault(obra, {})
-        estrutura[obra].setdefault(pacote, [])
-        estrutura[obra][pacote].append(codigo)
-
-    texto = ""
-
-    for obra in estrutura:
-        texto += f"OBRA: {obra}\n\n"
-
-        for pacote in estrutura[obra]:
-            texto += f"VOLUME {pacote}\n"
-            for cod in estrutura[obra][pacote]:
-                texto += f"- {cod}\n"
-            texto += "\n"
-
-        texto += "\n---------------------\n\n"
-
-    cur.close()
-    conn.close()
-
-    return Response(texto,
-        mimetype="text/plain",
-        headers={"Content-Disposition":"attachment;filename=separacao.txt"})
-
-# =========================
-# FRONT (OFFLINE)
-# =========================
 @app.route('/')
 def home():
     return """
@@ -190,17 +122,17 @@ def home():
 
 <style>
 body { margin:0; background:#111; color:white; font-family:Arial; }
-.header { padding:10px; background:#222; }
 
-.volume { margin:10px; padding:10px; border-radius:10px; }
+.header { padding:10px; background:#222; display:flex; flex-wrap:wrap; }
 
-.obra-1129 { background:#1b5e20; }
-.obra-1130 { background:#0d47a1; }
-.obra-1131 { background:#f9a825; color:black; }
-.obra-1132 { background:#b71c1c; }
+.btn { padding:8px; margin:3px; background:#00c853; border:none; border-radius:6px; color:white; }
 
-.item { border-bottom:1px solid rgba(255,255,255,0.1); }
-.btn { padding:10px; margin:5px; background:#00c853; border:none; border-radius:8px; color:white; }
+.volume { margin:10px; padding:10px; border-radius:10px; opacity:0.5; }
+.ativo { border:2px solid #00e5ff; opacity:1; }
+
+.item { display:flex; justify-content:space-between; padding:5px; border-bottom:1px solid #333; }
+
+.ok { color:#00e676; }
 </style>
 </head>
 
@@ -208,9 +140,11 @@ body { margin:0; background:#111; color:white; font-family:Arial; }
 
 <div class="header">
 <input id="user" placeholder="Usuário">
-<button class="btn" onclick="sync()">🔄 Sync</button>
-<button class="btn" onclick="excel()">📊 Excel</button>
-<button class="btn" onclick="obra()">📦 Separação</button>
+<button class="btn" onclick="prev()">⬅</button>
+<button class="btn" onclick="next()">➡</button>
+<button class="btn" onclick="trocarCamera()">📷</button>
+<button class="btn" onclick="sync()">🔄</button>
+<button class="btn" onclick="limpar()">🗑</button>
 </div>
 
 <div id="reader"></div>
@@ -218,69 +152,117 @@ body { margin:0; background:#111; color:white; font-family:Arial; }
 
 <script>
 let dados = JSON.parse(localStorage.getItem("dados") || "{}");
+let atual = null;
 
 function salvar(){ localStorage.setItem("dados", JSON.stringify(dados)); }
 
-function detectarObra(txt){
-    let m = txt.match(/OBRA\\s*(\\d+)/);
-    if(m) return m[1];
-    let n = txt.match(/\\d+/);
-    return n ? n[0] : "0000";
-}
-
 function atualizar(){
     let html = "";
+    let volumes = Object.keys(dados);
 
-    for(let v in dados){
-        let obra = dados[v].obra;
-        let pecas = dados[v].pecas;
+    volumes.forEach(v=>{
+        let vol = dados[v];
+        let ativo = (v === atual) ? "volume ativo" : "volume";
 
-        html += `<div class="volume obra-${obra}">
-        <b>📦 Volume ${v} | Obra ${obra} (${pecas.length})</b>`;
+        html += `<div class="${ativo}" onclick="setAtual('${v}')">
+        <b>📦 ${v} (${vol.pecas.length})</b>`;
 
-        pecas.forEach(p=>{
-            html += `<div class="item">🔢 ${p}</div>`;
+        vol.pecas.forEach((p,i)=>{
+            html += `<div class="item">
+                <span>${p}</span>
+                <span>
+                    <button onclick="ok('${v}',${i})">✔</button>
+                    <button onclick="del('${v}',${i})">❌</button>
+                </span>
+            </div>`;
         });
 
         html += "</div>";
-    }
+    });
 
     document.getElementById("lista").innerHTML = html;
 }
 
-function onScanSuccess(txt){
+function setAtual(v){ atual = v; atualizar(); }
 
+function prev(){
+    let vols = Object.keys(dados);
+    let i = vols.indexOf(atual);
+    if(i>0){ atual = vols[i-1]; atualizar(); }
+}
+
+function next(){
+    let vols = Object.keys(dados);
+    let i = vols.indexOf(atual);
+    if(i<vols.length-1){ atual = vols[i+1]; atualizar(); }
+}
+
+function limpar(){
+    if(atual && confirm("Limpar volume?")){
+        dados[atual].pecas = [];
+        salvar(); atualizar();
+    }
+}
+
+function del(v,i){
+    dados[v].pecas.splice(i,1);
+    salvar(); atualizar();
+}
+
+function ok(v,i){
+    alert("Conferido ✔");
+}
+
+function onScanSuccess(txt){
     txt = txt.toUpperCase();
 
     if(txt.includes("PACOTE")){
-        let num = txt.match(/\\d+/);
-        let obra = detectarObra(txt);
-
-        if(num){
-            let v = num[0];
-            if(!dados[v]) dados[v] = {obra:obra, pecas:[]};
-            salvar(); atualizar(); return;
+        let n = txt.match(/\\d+/);
+        if(n){
+            atual = n[0];
+            if(!dados[atual]) dados[atual] = {pecas:[]};
+            salvar(); atualizar();
+            return;
         }
     }
 
     let cod = txt.match(/\\d+/);
-    if(!cod) return;
+    if(!cod || !atual){ alert("Selecione volume"); return; }
+
     cod = cod[0];
 
-    let vols = Object.keys(dados);
-    if(vols.length===0){ alert("Leia volume"); return; }
-
-    vols.forEach(v=>{
-        if(!dados[v].pecas.includes(cod)){
-            dados[v].pecas.push(cod);
-        } else {
-            alert("Duplicado");
-        }
-    });
+    if(!dados[atual].pecas.includes(cod)){
+        dados[atual].pecas.push(cod);
+    } else {
+        alert("Duplicado");
+    }
 
     salvar(); atualizar();
 }
 
+// CAMERA
+let cameras=[], currentCamera=0;
+let html5QrCode = new Html5Qrcode("reader");
+
+function iniciarCamera(){
+    Html5Qrcode.getCameras().then(devices=>{
+        cameras = devices;
+        let back = devices.find(d=>d.label.toLowerCase().includes("back"));
+        currentCamera = back ? devices.indexOf(back) : 0;
+        start(cameras[currentCamera].id);
+    });
+}
+
+function start(id){
+    html5QrCode.start(id,{fps:10,qrbox:250},onScanSuccess);
+}
+
+function trocarCamera(){
+    currentCamera = (currentCamera+1)%cameras.length;
+    html5QrCode.stop().then(()=>start(cameras[currentCamera].id));
+}
+
+// SYNC
 function sync(){
     let user = document.getElementById("user").value;
 
@@ -294,17 +276,10 @@ function sync(){
         });
     }
 
-    alert("Sincronizado");
+    alert("Enviado");
 }
 
-function excel(){ window.open('/exportar_excel'); }
-function obra(){ window.open('/exportar_obra'); }
-
-const html5QrCode = new Html5Qrcode("reader");
-Html5Qrcode.getCameras().then(d=>{
-    html5QrCode.start(d[0].id,{fps:10,qrbox:250},onScanSuccess);
-});
-
+iniciarCamera();
 atualizar();
 </script>
 
@@ -312,9 +287,6 @@ atualizar();
 </html>
 """
 
-# =========================
-# RENDER (OBRIGATÓRIO)
-# =========================
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
