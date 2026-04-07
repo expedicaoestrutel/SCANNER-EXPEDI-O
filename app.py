@@ -1,115 +1,6 @@
-from flask import Flask, request, jsonify, Response
-import psycopg2, os, re
-import pandas as pd
-from io import BytesIO
+from flask import Flask
 
 app = Flask(__name__)
-DATABASE_URL = os.environ.get("DATABASE_URL")
-
-def db():
-    return psycopg2.connect(DATABASE_URL)
-
-def criar():
-    conn = db()
-    cur = conn.cursor()
-
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS leituras(
-        id SERIAL PRIMARY KEY,
-        pacote TEXT,
-        codigo TEXT,
-        obra TEXT,
-        usuario TEXT,
-        data TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-    """)
-
-    conn.commit()
-    cur.close()
-    conn.close()
-
-criar()
-
-def tratar_codigo(txt):
-    txt = txt.upper()
-    obra = None
-    codigo = txt
-
-    obra_match = re.search(r'OBRA\s*(\d+)', txt)
-    cod_match = re.findall(r'\d+', txt)
-
-    if obra_match:
-        obra = obra_match.group(1)
-
-    if cod_match:
-        codigo = cod_match[0]
-
-    return codigo, obra
-
-@app.route('/scan', methods=['POST'])
-def scan():
-    texto = request.json.get('code','').strip()
-    usuario = request.json.get('usuario','OPERADOR')
-    pacotes = request.json.get('pacotes', [])
-
-    texto_up = texto.upper()
-
-    if "PACOTE" in texto_up:
-        nums = re.findall(r"\d+", texto_up)
-        if nums:
-            return {"novo_pacote": nums[0]}
-
-    if not pacotes:
-        return {"erro":"sem pacote"}
-
-    codigo, obra = tratar_codigo(texto_up)
-
-    conn = db()
-    cur = conn.cursor()
-
-    duplicado = False
-
-    for p in pacotes:
-        cur.execute("""
-        SELECT 1 FROM leituras
-        WHERE pacote=%s AND codigo=%s
-        """,(p,codigo))
-
-        if cur.fetchone():
-            duplicado = True
-        else:
-            cur.execute("""
-            INSERT INTO leituras (pacote,codigo,obra,usuario)
-            VALUES (%s,%s,%s,%s)
-            """,(p,codigo,obra,usuario))
-
-    conn.commit()
-    cur.close()
-    conn.close()
-
-    if duplicado:
-        return {"duplicado": True}
-
-    return {"ok": True}
-
-@app.route('/exportar_excel')
-def exportar_excel():
-    conn = db()
-    df = pd.read_sql("SELECT * FROM leituras", conn)
-
-    output = BytesIO()
-    writer = pd.ExcelWriter(output, engine='openpyxl')
-
-    if not df.empty:
-        for obra in df['obra'].dropna().unique():
-            df[df['obra']==obra].to_excel(writer, sheet_name=f"OBRA_{obra}", index=False)
-
-    writer.close()
-    output.seek(0)
-
-    return Response(output,
-        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition":"attachment;filename=expedicao.xlsx"})
 
 @app.route('/')
 def home():
@@ -121,166 +12,227 @@ def home():
 <script src="https://unpkg.com/html5-qrcode"></script>
 
 <style>
-body { margin:0; background:#111; color:white; font-family:Arial; }
+body { margin:0; font-family:Arial; background:#f5f5f5; }
 
-.header { padding:10px; background:#222; display:flex; flex-wrap:wrap; }
+/* HEADER */
+.header {
+    background:#e53935;
+    color:white;
+    padding:15px;
+    font-size:20px;
+    display:flex;
+    align-items:center;
+}
 
-.btn { padding:8px; margin:3px; background:#00c853; border:none; border-radius:6px; color:white; }
+/* LISTA */
+.lista {
+    padding:10px;
+}
 
-.volume { margin:10px; padding:10px; border-radius:10px; opacity:0.5; }
-.ativo { border:2px solid #00e5ff; opacity:1; }
+.card {
+    background:white;
+    padding:15px;
+    margin-bottom:10px;
+    border-radius:10px;
+    box-shadow:0 2px 5px rgba(0,0,0,0.2);
+}
 
-.item { display:flex; justify-content:space-between; padding:5px; border-bottom:1px solid #333; }
+/* BOTÃO FLUTUANTE */
+.fab {
+    position:fixed;
+    bottom:20px;
+    right:20px;
+    background:#e53935;
+    color:white;
+    border:none;
+    width:60px;
+    height:60px;
+    border-radius:50%;
+    font-size:25px;
+}
 
-.ok { color:#00e676; }
+/* TELA LEITURA */
+#scannerTela {
+    display:none;
+    position:fixed;
+    top:0;
+    left:0;
+    width:100%;
+    height:100%;
+    background:black;
+}
+
+#reader { width:100%; }
+
+/* TOPO LEITOR */
+.topoScanner {
+    position:absolute;
+    top:0;
+    width:100%;
+    background:#e53935;
+    padding:10px;
+    color:white;
+    display:flex;
+    justify-content:space-between;
+}
 </style>
 </head>
 
 <body>
 
 <div class="header">
-<input id="user" placeholder="Usuário">
-<button class="btn" onclick="prev()">⬅</button>
-<button class="btn" onclick="next()">➡</button>
-<button class="btn" onclick="trocarCamera()">📷</button>
-<button class="btn" onclick="sync()">🔄</button>
-<button class="btn" onclick="limpar()">🗑</button>
+☰ Sessões de leitura
 </div>
 
-<div id="reader"></div>
-<div id="lista"></div>
+<div class="lista" id="lista"></div>
+
+<button class="fab" onclick="abrirScanner()">📷</button>
+
+<!-- TELA SCANNER -->
+<div id="scannerTela">
+
+    <div class="topoScanner">
+        <button onclick="fecharScanner()">⬅</button>
+        <span>Leitura</span>
+        <button onclick="toggleFlash()">🔦</button>
+    </div>
+
+    <div id="reader"></div>
+</div>
 
 <script>
 let dados = JSON.parse(localStorage.getItem("dados") || "{}");
-let atual = null;
 
-function salvar(){ localStorage.setItem("dados", JSON.stringify(dados)); }
-
-function atualizar(){
+// =========================
+// LISTA
+// =========================
+function atualizarLista(){
     let html = "";
-    let volumes = Object.keys(dados);
 
-    volumes.forEach(v=>{
-        let vol = dados[v];
-        let ativo = (v === atual) ? "volume ativo" : "volume";
-
-        html += `<div class="${ativo}" onclick="setAtual('${v}')">
-        <b>📦 ${v} (${vol.pecas.length})</b>`;
-
-        vol.pecas.forEach((p,i)=>{
-            html += `<div class="item">
-                <span>${p}</span>
-                <span>
-                    <button onclick="ok('${v}',${i})">✔</button>
-                    <button onclick="del('${v}',${i})">❌</button>
-                </span>
-            </div>`;
-        });
-
-        html += "</div>";
-    });
+    for(let v in dados){
+        html += `
+        <div class="card">
+            <b>RELATÓRIO VOLUME ${v}</b><br>
+            Leituras: ${dados[v].length}
+        </div>`;
+    }
 
     document.getElementById("lista").innerHTML = html;
 }
 
-function setAtual(v){ atual = v; atualizar(); }
+// =========================
+// SCANNER
+// =========================
+let html5QrCode;
+let flashOn = false;
 
-function prev(){
-    let vols = Object.keys(dados);
-    let i = vols.indexOf(atual);
-    if(i>0){ atual = vols[i-1]; atualizar(); }
+function abrirScanner(){
+    document.getElementById("scannerTela").style.display = "block";
+
+    html5QrCode = new Html5Qrcode("reader");
+
+    Html5Qrcode.getCameras().then(devices => {
+
+        let back = devices.find(d =>
+            d.label.toLowerCase().includes("back") ||
+            d.label.toLowerCase().includes("environment")
+        );
+
+        let cam = back ? back.id : devices[0].id;
+
+        html5QrCode.start(
+            cam,
+            { fps:10, qrbox:250 },
+            onScan
+        );
+    });
 }
 
-function next(){
-    let vols = Object.keys(dados);
-    let i = vols.indexOf(atual);
-    if(i<vols.length-1){ atual = vols[i+1]; atualizar(); }
+function fecharScanner(){
+    html5QrCode.stop().then(()=>{
+        document.getElementById("scannerTela").style.display = "none";
+    });
 }
 
-function limpar(){
-    if(atual && confirm("Limpar volume?")){
-        dados[atual].pecas = [];
-        salvar(); atualizar();
-    }
-}
+// =========================
+// LEITURA
+// =========================
+function onScan(txt){
 
-function del(v,i){
-    dados[v].pecas.splice(i,1);
-    salvar(); atualizar();
-}
-
-function ok(v,i){
-    alert("Conferido ✔");
-}
-
-function onScanSuccess(txt){
     txt = txt.toUpperCase();
 
+    // volume
     if(txt.includes("PACOTE")){
         let n = txt.match(/\\d+/);
         if(n){
-            atual = n[0];
-            if(!dados[atual]) dados[atual] = {pecas:[]};
-            salvar(); atualizar();
+            let v = n[0];
+            if(!dados[v]) dados[v] = [];
+            salvar();
+            atualizarLista();
+            vibrar();
             return;
         }
     }
 
     let cod = txt.match(/\\d+/);
-    if(!cod || !atual){ alert("Selecione volume"); return; }
+    if(!cod) return;
 
     cod = cod[0];
 
-    if(!dados[atual].pecas.includes(cod)){
-        dados[atual].pecas.push(cod);
-    } else {
-        alert("Duplicado");
+    let vols = Object.keys(dados);
+    if(vols.length === 0){
+        alert("Leia um volume primeiro");
+        return;
     }
 
-    salvar(); atualizar();
+    vols.forEach(v=>{
+        if(!dados[v].includes(cod)){
+            dados[v].push(cod);
+        }
+    });
+
+    salvar();
+    atualizarLista();
+    vibrar();
 }
 
-// CAMERA
-let cameras=[], currentCamera=0;
-let html5QrCode = new Html5Qrcode("reader");
+// =========================
+// FLASH
+// =========================
+function toggleFlash(){
 
-function iniciarCamera(){
-    Html5Qrcode.getCameras().then(devices=>{
-        cameras = devices;
-        let back = devices.find(d=>d.label.toLowerCase().includes("back"));
-        currentCamera = back ? devices.indexOf(back) : 0;
-        start(cameras[currentCamera].id);
+    let track = html5QrCode.getRunningTrack();
+    if(!track) return;
+
+    let cap = track.getCapabilities();
+
+    if(!cap.torch){
+        alert("Sem flash");
+        return;
+    }
+
+    flashOn = !flashOn;
+
+    track.applyConstraints({
+        advanced:[{torch:flashOn}]
     });
 }
 
-function start(id){
-    html5QrCode.start(id,{fps:10,qrbox:250},onScanSuccess);
-}
-
-function trocarCamera(){
-    currentCamera = (currentCamera+1)%cameras.length;
-    html5QrCode.stop().then(()=>start(cameras[currentCamera].id));
-}
-
-// SYNC
-function sync(){
-    let user = document.getElementById("user").value;
-
-    for(let v in dados){
-        dados[v].pecas.forEach(c=>{
-            fetch('/scan',{
-                method:'POST',
-                headers:{'Content-Type':'application/json'},
-                body:JSON.stringify({code:c,usuario:user,pacotes:[v]})
-            });
-        });
+// =========================
+// VIBRAR
+// =========================
+function vibrar(){
+    if(navigator.vibrate){
+        navigator.vibrate(100);
     }
-
-    alert("Enviado");
 }
 
-iniciarCamera();
-atualizar();
+// =========================
+function salvar(){
+    localStorage.setItem("dados", JSON.stringify(dados));
+}
+
+atualizarLista();
 </script>
 
 </body>
@@ -288,5 +240,4 @@ atualizar();
 """
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(debug=True)
